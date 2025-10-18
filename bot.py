@@ -1,7 +1,10 @@
 import json
 import logging
+import re
 from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
+from telegram.ext import (
+    ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
+)
 
 # ======================
 # Логирование
@@ -13,32 +16,28 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ======================
-# Загружаем конфиг
+# Загрузка конфигурации
 # ======================
-with open("config.json", encoding="utf-8") as f:
+with open("config.json", "r", encoding="utf-8") as f:
     config = json.load(f)
 
-bot_token = config["bot_token"]
-allowed_chat_ids = config["allowed_chat_ids"]
-cities = config["cities"]
-match_case_insensitive = config.get("match_case_insensitive", True)
+BOT_TOKEN = config["bot_token"]
+ALLOWED_CHAT_IDS = config.get("allowed_chat_ids", [])
+CITIES = config.get("cities", {})
+MATCH_CASE_INSENSITIVE = config.get("match_case_insensitive", True)
 
-logger.info(f"Webhook URL: https://city-tags-bot.onrender.com/{bot_token}")
-logger.info(f"Allowed chat ids: {allowed_chat_ids}")
+logger.info(f"Webhook URL: https://city-tags-bot.onrender.com/{BOT_TOKEN}")
+logger.info(f"Allowed chat ids: {ALLOWED_CHAT_IDS}")
 
 # ======================
 # Команды
 # ======================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
-    if chat_id not in allowed_chat_ids:
-        return
-    await update.message.reply_text("Привет! Я бот и теперь работаю в группах и личке!")
+    logger.info(f"/start вызван в чате {chat_id} пользователем {update.effective_user.id}")
+    await update.message.reply_text("Привет! Я бот и теперь работаю в личке и в группах!")
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    if chat_id not in allowed_chat_ids:
-        return
     await update.message.reply_text(
         "Список команд:\n"
         "/start - начать работу\n"
@@ -46,41 +45,61 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 # ======================
-# Обработка сообщений
+# Функция обработки откликов
 # ======================
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
-    if chat_id not in allowed_chat_ids:
-        logger.info(f"Сообщение из запрещённого чата: {chat_id}")
+    text = update.message.text
+    user_id = update.effective_user.id
+    username = update.effective_user.username
+
+    logger.info(f"Сообщение от {username} ({user_id}) в чате {chat_id}: {text}")
+
+    if chat_id not in ALLOWED_CHAT_IDS:
+        logger.info(f"Чат {chat_id} не разрешён.")
         return
 
-    text = update.message.text
-    logger.info(f"Сообщение в чате {chat_id}: {text}")
+    # Ищем город в тексте
+    city_found = None
+    for city in CITIES.keys():
+        compare_text = text.lower() if MATCH_CASE_INSENSITIVE else text
+        compare_city = city.lower() if MATCH_CASE_INSENSITIVE else city
+        if compare_city in compare_text:
+            city_found = city
+            break
 
-    # Можно добавить проверку на города
-    response = "Вы написали: " + text
+    if not city_found:
+        logger.info("Город не найден в сообщении.")
+        return
+
+    # Берём первого ответственного из списка
+    responsible = CITIES[city_found][0]
+
+    # Формируем ответ
+    response = f"{responsible}, #{city_found.replace(' ', '')}"
+
+    # Отправляем в чат
     await update.message.reply_text(response)
 
 # ======================
 # Основная функция
 # ======================
 def main():
-    app = ApplicationBuilder().token(bot_token).build()
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
 
-    # Обработчики команд
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
 
-    # Обработчик текстовых сообщений в личке и группах
-    app.add_handler(
-        MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message)
-    )
+    app.add_handler(MessageHandler(
+        filters.TEXT & ~filters.COMMAND &
+        (filters.ChatType.PRIVATE | filters.ChatType.GROUP | filters.ChatType.SUPERGROUP),
+        handle_message
+    ))
 
-    # Запуск webhook
     app.run_webhook(
         listen="0.0.0.0",
         port=8000,
-        webhook_url=f"https://city-tags-bot.onrender.com/{bot_token}"
+        webhook_url=f"https://city-tags-bot.onrender.com/{BOT_TOKEN}"
     )
 
 if __name__ == "__main__":
