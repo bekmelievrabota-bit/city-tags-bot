@@ -1,0 +1,16 @@
+{ 
+  "bot_token": "8365287010:AAEXTAt_uZQqKoS6UxEQA25D6CJMdMUwhdg",
+  "allowed_chat_ids": [6742361886,-4931161339],
+  "cities": {
+    "Москва": ["@w333rd" , "@Gbrfad"],
+    "Калуга": ["@rabot_v_Kaluge"],
+    "Кострома": ["@ElenaHR_KCM"],
+    "Пенза": ["@HRPenza"],
+    "Тула": ["@Nadia_Kom"],
+    "Ярославль": ["@NastasiyaLite"],
+    "Курск": ["@Valkyrie7599"],
+    "Белгород": ["@Bgd_ks"],
+    "Ханты-Мансийск": ["@ekatt_hr"]
+  },
+  "match_case_insensitive": true
+}
