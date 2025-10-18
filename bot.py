@@ -100,7 +100,5 @@ async def main():
 
     await asyncio.Event().wait()  # держим приложение живым
 
-if name == '__main__':
-    if __name__ == '__main__':
+if __name__ == '__main__':
     app.run_polling()
-asyncio.run(main())
