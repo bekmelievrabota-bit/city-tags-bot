@@ -1,146 +1,103 @@
-import os
+import json
 import logging
+import os
 from telegram import Update
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
     MessageHandler,
     ContextTypes,
-    filters
+    filters,
 )
+import asyncio
 
-# ==================== НАСТРОЙКИ ====================
-
-TOKEN = os.getenv("BOT_TOKEN")  # токен из Render env vars
-WEBHOOK_URL = os.getenv("RENDER_EXTERNAL_URL", "").strip()  # Render сам подставит свой домен
-ADMIN_ID = 123456789  # ТВОЙ Telegram ID (замени!)
-
-CONFIG_FILE = "config.txt"  # файл с городами и тегами
-
-# ==================== ЛОГИ ====================
-
-logging.basicConfig(
-    format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO
-)
-logger = logging.getLogger(__name__)
-
-# ==================== ДАННЫЕ ====================
+# ---------------------- НАСТРОЙКИ ----------------------
+CONFIG_PATH = "config.json"
 
 def load_config():
-    tags, cities = {}, []
-    if os.path.exists(CONFIG_FILE):
-        with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-            for line in f:
-                if line.startswith("city:"):
-                    cities.append(line.split(":", 1)[1].strip().lower())
-                elif line.startswith("tag:"):
-                    parts = line.strip().split(":", 2)
-                    if len(parts) == 3:
-                        tags[parts[1].lower()] = parts[2]
-    return tags, cities
+    with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+        return json.load(f)
 
-def save_config(tags, cities):
-    with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-        for city in cities:
-            f.write(f"city:{city}\n")
-        for k, v in tags.items():
-            f.write(f"tag:{k}:{v}\n")
+def save_config(data):
+    with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
 
-tags, cities = load_config()
+config = load_config()
+BOT_TOKEN = config["bot_token"]
+ALLOWED_CHAT_IDS = set(config["allowed_chat_ids"])
+OWNER_ID = 6742361886  # Только ты можешь редактировать города/теги
 
-# ==================== КОМАНДЫ ====================
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
+# ---------------------- ХЭНДЛЕРЫ ----------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("✅ Бот запущен и готов к работе!")
+    await update.message.reply_text("✅ Бот запущен. Отправь название города или отклик.")
 
 async def add_city(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID:
-        return await update.message.reply_text("🚫 У тебя нет прав.")
-    if not context.args:
-        return await update.message.reply_text("Используй: /add_city Москва")
-    city = " ".join(context.args).lower()
-    if city in cities:
-        return await update.message.reply_text("⚠️ Город уже есть.")
-    cities.append(city)
-    save_config(tags, cities)
-    await update.message.reply_text(f"✅ Город '{city}' добавлен.")
+    if update.effective_user.id != OWNER_ID:
+        return await update.message.reply_text("⛔ У тебя нет прав для добавления городов.")
+    if len(context.args) < 2:
+        return await update.message.reply_text("❗ Используй формат:\n/add <город> <@тег>")
+    city, tag = context.args[0], context.args[1]
+    config = load_config()
+    config["cities"][city] = [tag]
+    save_config(config)
+    await update.message.reply_text(f"✅ Добавлен город {city} с тегом {tag}")
 
 async def del_city(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID:
-        return await update.message.reply_text("🚫 У тебя нет прав.")
+    if update.effective_user.id != OWNER_ID:
+        return await update.message.reply_text("⛔ У тебя нет прав для удаления городов.")
     if not context.args:
-        return await update.message.reply_text("Используй: /del_city Москва")
-    city = " ".join(context.args).lower()
-    if city not in cities:
-        return await update.message.reply_text("⚠️ Такого города нет.")
-    cities.remove(city)
-    save_config(tags, cities)
-    await update.message.reply_text(f"🗑 Город '{city}' удалён.")
-
-async def add_tag(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID:
-        return await update.message.reply_text("🚫 У тебя нет прав.")
-    if len(context.args) < 2:
-        return await update.message.reply_text("Используй: /add_tag имя @тег")
-    name = context.args[0].lower()
-    tag = context.args[1]
-    tags[name] = tag
-    save_config(tags, cities)
-    await update.message.reply_text(f"✅ Тег '{name}' добавлен: {tag}")
-
-async def del_tag(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID:
-        return await update.message.reply_text("🚫 У тебя нет прав.")
-    if not context.args:
-        return await update.message.reply_text("Используй: /del_tag имя")
-    name = context.args[0].lower()
-    if name not in tags:
-        return await update.message.reply_text("⚠️ Такого тега нет.")
-    del tags[name]
-    save_config(tags, cities)
-    await update.message.reply_text(f"🗑 Тег '{name}' удалён.")
-
-# ==================== ОСНОВНАЯ ЛОГИКА ====================
-
-async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text.lower()
-    found_city = next((c for c in cities if c in text), None)
-    found_tag = next((t for t in tags if t in text), None)
-
-    if found_city and found_tag:
-        reply = f"{tags[found_tag]}, #{found_city.replace(' ', '_')}"
-        await update.message.reply_text(reply, reply_to_message_id=update.message.message_id)
-        logger.info(f"Ответ: {reply}")
+        return await update.message.reply_text("❗ Используй формат:\n/del <город>")
+    city = context.args[0]
+    config = load_config()
+    if city in config["cities"]:
+        del config["cities"][city]
+        save_config(config)
+        await update.message.reply_text(f"🗑 Удалён город {city}")
     else:
-        logger.info(f"Сообщение без совпадений: {text}")
+        await update.message.reply_text("❌ Город не найден.")
 
-# ==================== ЗАПУСК ====================
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip()
+    config = load_config()
+    cities = config["cities"]
 
+    for city, tags in cities.items():
+        if city.lower() in text.lower():
+            mention = " ".join(tags)
+            response = f"{mention}\n#{city.replace(' ', '_')}"
+            await update.message.reply_text(response, reply_to_message_id=update.message.message_id)
+            return
+    await update.message.reply_text("⚠️ Город не найден в списке.")
+
+# ---------------------- ЗАПУСК ----------------------
 async def main():
-    logger.info("🚀 Запуск Telegram-бота...")
-
-    app = ApplicationBuilder().token(TOKEN).build()
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("add_city", add_city))
-    app.add_handler(CommandHandler("del_city", del_city))
-    app.add_handler(CommandHandler("add_tag", add_tag))
-    app.add_handler(CommandHandler("del_tag", del_tag))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, process_message))
+    app.add_handler(CommandHandler("add", add_city))
+    app.add_handler(CommandHandler("del", del_city))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    port = int(os.environ.get("PORT", 8080))
-    if WEBHOOK_URL:
-        logger.info(f"🌐 Устанавливаю webhook: {WEBHOOK_URL}")
+    port = int(os.environ.get("PORT", 8443))
+    domain = os.environ.get("RENDER_EXTERNAL_URL")
+
+    if domain:
+        webhook_url = f"{domain}/webhook"
+        logging.info(f"🌐 Устанавливаю webhook: {webhook_url}")
         try:
-            await app.bot.set_webhook(WEBHOOK_URL)
-            await app.run_webhook(listen="0.0.0.0", port=port, webhook_url=WEBHOOK_URL)
+            await app.run_webhook(
+                listen="0.0.0.0",
+                port=port,
+                webhook_url=webhook_url,
+            )
         except Exception as e:
-            logger.error(f"Ошибка webhook ({e}), перехожу на polling")
+            logging.error(f"❌ Ошибка webhook ({e}), переключаюсь на polling")
             await app.run_polling()
     else:
-        logger.warning("⚠️ Не найден WEBHOOK_URL, запускаю polling")
+        logging.info("⚙️ Домен не найден, запускаю polling")
         await app.run_polling()
 
 if __name__ == "__main__":
-    import asyncio
-    asyncio.get_event_loop().run_until_complete(main())
+    asyncio.run(main())
