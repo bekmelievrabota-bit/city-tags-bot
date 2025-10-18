@@ -58,166 +58,90 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # --------------------- Новый код для кнопок --------------------- #
 
-# Состояния для ConversationHandler
-WAIT_CITY_NAME, WAIT_TAG_NAME, WAIT_TAG_USERS = range(3)
-
-# Команда /menu
-async def start_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = [
-        [InlineKeyboardButton("Добавить город", callback_data="add_city")],
-        [InlineKeyboardButton("Добавить тег", callback_data="add_tag")],
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text("Что вы хотите сделать?", reply_markup=reply_markup)
-
-# Обработка кнопок
-async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-
-    if query.data == "add_city":
-        await query.message.reply_text("Введите название нового города:")
-        return WAIT_CITY_NAME
-    elif query.data == "add_tag":
-        await query.message.reply_text("Введите название города, к которому хотите добавить тег:")
-        return WAIT_TAG_NAME
-
-# Обработка нового города
-async def add_city(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    new_city = update.message.text.strip()
-    if new_city in CITIES:
-        await update.message.reply_text("Такой город уже существует!")
-    else:
-        CITIES[new_city] = []
-        CITY_PATTERNS[new_city] = re.compile(
-            re.escape(new_city), re.IGNORECASE if MATCH_CASE_INSENSITIVE else 0
-        )
-        await update.message.reply_text(f"Город '{new_city}' добавлен.")
-        logger.info(f"Добавлен город: {new_city}")
-    return ConversationHandler.END
-
-# Обработка ввода города для тега
-async def ask_tag_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    city = update.message.text.strip()
-    if city not in CITIES:
-        await update.message.reply_text("Такого города нет! Сначала добавьте город.")
-        return ConversationHandler.END
-    context.user_data["tag_city"] = city
-    await update.message.reply_text(f"Введите пользователей для города '{city}' через запятую:")
-    return WAIT_TAG_USERS
-
-# Обработка пользователей для тега
-async def add_tag_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    city = context.user_data.get("tag_city")
-    if not city:
-        await update.message.reply_text("Ошибка: город не найден в данных.")
-        return ConversationHandler.END
-
-    users = [u.strip() for u in update.message.text.split(",") if u.strip()]
-    CITIES[city].extend(users)
-    await update.message.reply_text(f"Пользователи {users} добавлены к городу '{city}'.")
-    logger.info(f"Добавлены пользователи к {city}: {users}")
-    return ConversationHandler.END
-
-def main():
-    PORT = int(os.environ.get("PORT", 8000))
-    APP_URL = f"https://{os.environ.get('RENDER_EXTERNAL_HOSTNAME')}/{BOT_TOKEN}"
-
-    application = Application.builder().token(BOT_TOKEN).build()
-
-    # Обрабатываем текстовые сообщения для тегов
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-
-    # ConversationHandler для меню и кнопок
-    conv_handler = ConversationHandler(
-        entry_points=[CommandHandler("menu", start_menu), CallbackQueryHandler(button_handler)],
-        states={
-            WAIT_CITY_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_city)],
-            WAIT_TAG_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_tag_users)],
-            WAIT_TAG_USERS: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_tag_users)],
-        },
-        fallbacks=[],
-        per_user=True,
-        per_chat=True
-    )
-
-    application.add_handler(conv_handler)
-
-    logger.info(f"🚀 Запуск на порту {PORT}, webhook {APP_URL}")
-    application.run_webhook(
-        listen="0.0.0.0",
-        port=PORT,
-        url_path=BOT_TOKEN,
-        webhook_url=APP_URL,
-    )
-
-if __name__ == "__main__":
-    main()
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ConversationHandler, CallbackQueryHandler, CommandHandler, MessageHandler, filters
 
-# состояния
-WAIT_CITY_NAME, WAIT_TAG = range(2)
+WAIT_ACTION, WAIT_INPUT = range(2)
 
-# меню с кнопками
 async def menu_command(update, context):
     keyboard = [
-        [InlineKeyboardButton("Добавить город", callback_data="add_city")],
-        [InlineKeyboardButton("Добавить тег", callback_data="add_tag")]
+        [InlineKeyboardButton("Добавить город", callback_data="add_city"),
+         InlineKeyboardButton("Удалить город", callback_data="remove_city")],
+        [InlineKeyboardButton("Добавить тег", callback_data="add_tag"),
+         InlineKeyboardButton("Удалить тег", callback_data="remove_tag")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text("Что хотите сделать?", reply_markup=reply_markup)
-    return WAIT_CITY_NAME  # ждем выбора кнопки
+    await update.message.reply_text("Выберите действие:", reply_markup=reply_markup)
+    return WAIT_ACTION
 
-# обработка нажатий кнопок
 async def button_handler(update, context):
     query = update.callback_query
     await query.answer()
-    if query.data == "add_city":
-        await query.message.reply_text("Введите название нового города:")
-        context.user_data["action"] = "city"
-        return WAIT_CITY_NAME
-    elif query.data == "add_tag":
-        await query.message.reply_text("Введите город, к которому хотите добавить тег:")
-        context.user_data["action"] = "tag"
-        return WAIT_TAG
-    return WAIT_CITY_NAME
+    context.user_data["action"] = query.data
+    if query.data in ["add_city", "remove_city"]:
+        await query.message.reply_text("Введите название города:")
+    elif query.data in ["add_tag", "remove_tag"]:
+        await query.message.reply_text("Введите город и тег через двоеточие, например: Москва:Проверка")
+    return WAIT_INPUT
 
-# обработка введенного текста
 async def text_input(update, context):
-    action = context.user_data.get("action")
     text = update.message.text.strip()
-    if action == "city":
-        # здесь можно добавить город в конфиг или просто логировать
-        CITIES[text] = []
-        await update.message.reply_text(f"Город '{text}' добавлен ✅")
-    elif action == "tag":
-        # ожидаем ввода "город:тег" например
+    action = context.user_data.get("action")
+
+    if action == "add_city":
+        if text in CITIES:
+            await update.message.reply_text(f"Город '{text}' уже существует ❌")
+        else:
+            CITIES[text] = []
+            CITY_PATTERNS[text] = re.compile(re.escape(text), re.IGNORECASE if MATCH_CASE_INSENSITIVE else 0)
+            await update.message.reply_text(f"Город '{text}' добавлен ✅")
+
+    elif action == "remove_city":
+        if text in CITIES:
+            del CITIES[text]
+            del CITY_PATTERNS[text]
+            await update.message.reply_text(f"Город '{text}' удален ✅")
+        else:
+            await update.message.reply_text(f"Город '{text}' не найден ❌")
+
+    elif action == "add_tag":
         try:
             city, tag = map(str.strip, text.split(":"))
             if city in CITIES:
-                CITIES[city].append(tag)
-                await update.message.reply_text(f"Тег '{tag}' добавлен к городу '{city}' ✅")
+                if tag in CITIES[city]:
+                    await update.message.reply_text(f"Тег '{tag}' уже существует для города '{city}' ❌")
+                else:
+                    CITIES[city].append(tag)
+                    await update.message.reply_text(f"Тег '{tag}' добавлен к городу '{city}' ✅")
             else:
                 await update.message.reply_text(f"Город '{city}' не найден ❌")
         except:
             await update.message.reply_text("Неверный формат! Используйте: город:тег")
-    # возвращаем меню
-    await menu_command(update, context)
-    return WAIT_CITY_NAME
 
-# создаем ConversationHandler
+    elif action == "remove_tag":
+        try:
+            city, tag = map(str.strip, text.split(":"))
+            if city in CITIES and tag in CITIES[city]:
+                CITIES[city].remove(tag)
+                await update.message.reply_text(f"Тег '{tag}' удален у города '{city}' ✅")
+            else:
+                await update.message.reply_text(f"Город или тег не найден ❌")
+        except:
+            await update.message.reply_text("Неверный формат! Используйте: город:тег")
+
+    # Возвращаем меню после действия
+    await menu_command(update, context)
+    return WAIT_ACTION
+
+# ================= ConversationHandler =================
 menu_conv_handler = ConversationHandler(
     entry_points=[CommandHandler("menu", menu_command)],
     states={
-        WAIT_CITY_NAME: [
-            CallbackQueryHandler(button_handler),
-            MessageHandler(filters.TEXT & ~filters.COMMAND, text_input)
-        ],
-        WAIT_TAG: [MessageHandler(filters.TEXT & ~filters.COMMAND, text_input)],
+        WAIT_ACTION: [CallbackQueryHandler(button_handler)],
+        WAIT_INPUT: [MessageHandler(filters.TEXT & ~filters.COMMAND, text_input)],
     },
     fallbacks=[CommandHandler("menu", menu_command)],
 )
 
-# подключаем к приложению
-application.add_handler(menu_conv_handler)
+# ================= В main добавляем =================
+# application.add_handler(menu_conv_handler)
