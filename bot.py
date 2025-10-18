@@ -1,104 +1,142 @@
 import json
 import logging
-import asyncio
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
+import os
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from telegram import Update
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
-# Настройка логов
+# ============ ЛОГИ ============
 logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    format="%(asctime)s - %(levelname)s - %(message)s",
     level=logging.INFO
 )
 
-# Загрузка конфига
-CONFIG_FILE = 'config.json'
-with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
-    config = json.load(f)
+# ============ ЗАГРУЗКА КОНФИГА ============
+CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config.json")
 
-BOT_TOKEN = config['bot_token']
-ALLOWED_CHAT_IDS = config['allowed_chat_ids']
-CITIES = config['cities']
-MATCH_CASE_INSENSITIVE = config.get('match_case_insensitive', True)
-ADMIN_IDS = [6742361886]  # Твой Telegram ID
+def load_config():
+    try:
+        with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception as e:
+        logging.error(f"Ошибка загрузки config.json: {e}")
+        return {}
 
-# Сохраняем конфиг
-def save_config():
-    with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
-        json.dump(config, f, ensure_ascii=False, indent=2)
+def save_config(config):
+    try:
+        with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+            json.dump(config, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logging.error(f"Ошибка сохранения config.json: {e}")
 
-# Проверка администратора
-def is_admin(user_id: int):
-    return user_id in ADMIN_IDS
+config = load_config()
+BOT_TOKEN = config.get("bot_token")
+ADMIN_ID = config.get("admin_id")
+ALLOWED_CHATS = config.get("allowed_chat_ids", [])
+CITIES = config.get("cities", {})
+MATCH_CASE_INSENSITIVE = config.get("match_case_insensitive", True)
 
-# Добавление/удаление городов и тегов
-async def handle_admin_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    if not is_admin(user_id):
-        return
-
-    text = update.message.text.strip()
-    chat_id = update.message.chat_id
-
-    # Команды добавления
-    if text.startswith('/add_city '):
-        parts = text.split(' ', 2)
-        if len(parts) < 3:
-            await update.message.reply_text("Используй /add_city <Город> <@тег>")
-            return
-        city, tag = parts[1], parts[2]
-        if city not in CITIES:
-            CITIES[city] = []
-        if tag not in CITIES[city]:
-            CITIES[city].append(tag)
-        save_config()
-        await update.message.reply_text(f"Добавлен {tag} в город {city}")
-        return
-
-    if text.startswith('/remove_city '):
-        parts = text.split(' ', 2)
-        if len(parts) < 3:
-            await update.message.reply_text("Используй /remove_city <Город> <@тег>")
-            return
-        city, tag = parts[1], parts[2]
-        if city in CITIES and tag in CITIES[city]:
-            CITIES[city].remove(tag)
-            if not CITIES[city]:
-                del CITIES[city]
-            save_config()
-            await update.message.reply_text(f"Удален {tag} из города {city}")
-        else:
-            await update.message.reply_text("Такого города или тега нет")
-        return
-
-# Автоответ на отклики
+# ============ ОСНОВНАЯ ЛОГИКА ============
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.message.chat_id not in ALLOWED_CHAT_IDS:
+    if not update.message:
         return
 
-    text = update.message.text
-    # Проверка на соответствие городам
+    chat_id = update.message.chat_id
+    text = update.message.text.strip()
+
+    if chat_id not in ALLOWED_CHATS:
+        logging.info(f"Сообщение из неразрешенного чата: {chat_id}")
+        return
+
+    # Проверяем города
     for city, tags in CITIES.items():
-        if (text.lower() if MATCH_CASE_INSENSITIVE else text) == (city.lower() if MATCH_CASE_INSENSITIVE else city):
-            reply_text = ', '.join(tags) + f", #{city}"
+        if (city.lower() in text.lower()) if MATCH_CASE_INSENSITIVE else (city in text):
+            tag_str = ", ".join(tags)
+            reply_text = f"{tag_str}, #{city.replace(' ', '_')}"
             await update.message.reply_text(reply_text, reply_to_message_id=update.message.message_id)
+            logging.info(f"Ответ на город {city}: {reply_text}")
             return
 
-async def main():
-    app = Application.builder().token(BOT_TOKEN).build()
+async def add_city(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message.from_user.id != ADMIN_ID:
+        await update.message.reply_text("⛔ У тебя нет прав на выполнение этой команды.")
+        return
 
-    # Обработчики
-    app.add_handler(MessageHandler(filters.TEXT & filters.ChatType.PRIVATE, handle_admin_message))
-    app.add_handler(MessageHandler(filters.TEXT & filters.ChatType.GROUPS, handle_message))
+    try:
+        args = context.args
+        if len(args) < 2:
+            await update.message.reply_text("Используй формат: /addcity Город @тег1 @тег2 ...")
+            return
 
-    # Запуск webhook
-    PORT = 8000
-    URL = f"https://city-tags-bot.onrender.com/{BOT_TOKEN}"
-    await app.initialize()
-    await app.start()
-    await app.bot.set_webhook(URL)
-    logging.info(f"🚀 Бот запущен на webhook: {URL}")
+        city = args[0]
+        tags = args[1:]
+        CITIES[city] = tags
+        config["cities"] = CITIES
+        save_config(config)
+        await update.message.reply_text(f"✅ Добавлен город {city} с тегами {', '.join(tags)}")
+        logging.info(f"Город добавлен: {city} -> {tags}")
+    except Exception as e:
+        logging.error(f"Ошибка при добавлении города: {e}")
+        await update.message.reply_text("Ошибка при добавлении города.")
 
-    await asyncio.Event().wait()  # держим приложение живым
+async def del_city(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message.from_user.id != ADMIN_ID:
+        await update.message.reply_text("⛔ У тебя нет прав на выполнение этой команды.")
+        return
+
+    try:
+        if not context.args:
+            await update.message.reply_text("Используй формат: /delcity Город")
+            return
+
+        city = context.args[0]
+        if city in CITIES:
+            del CITIES[city]
+            config["cities"] = CITIES
+            save_config(config)
+            await update.message.reply_text(f"🗑 Город {city} удалён.")
+            logging.info(f"Город удалён: {city}")
+        else:
+            await update.message.reply_text("❌ Такого города нет в списке.")
+    except Exception as e:
+        logging.error(f"Ошибка при удалении города: {e}")
+        await update.message.reply_text("Ошибка при удалении города.")
+
+# ============ СЕРВЕР ДЛЯ ВЕБХУКА ============
+class SimpleWebhookServer(BaseHTTPRequestHandler):
+    def do_POST(self):
+        content_length = int(self.headers["Content-Length"])
+        body = self.rfile.read(content_length)
+        try:
+            update = Update.de_json(json.loads(body.decode("utf-8")), app.bot)
+            app.update_queue.put_nowait(update)
+            self.send_response(200)
+            self.end_headers()
+        except Exception as e:
+            logging.error(f"Ошибка при обработке вебхука: {e}")
+            self.send_response(500)
+            self.end_headers()
+
+# ============ ЗАПУСК ============
+app = Application.builder().token(BOT_TOKEN).build()
+app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+app.add_handler(CommandHandler("addcity", add_city))
+app.add_handler(CommandHandler("delcity", del_city))
+
+PORT = int(os.environ.get("PORT", "8080"))
+WEBHOOK_URL = f"https://{os.environ.get('RENDER_EXTERNAL_URL', 'example.com')}/webhook"
+
+async def set_webhook():
+    await app.bot.set_webhook(url=WEBHOOK_URL)
+    logging.info(f"✅ Вебхук установлен: {WEBHOOK_URL}")
 
 if __name__ == '__main__':
-    app.run_polling()
+    import asyncio
+
+    async def main():
+        await set_webhook()
+        server = HTTPServer(("0.0.0.0", PORT), SimpleWebhookServer)
+        logging.info(f"🚀 Бот запущен и слушает порт {PORT}")
+        server.serve_forever()
+
+    asyncio.run(main())
