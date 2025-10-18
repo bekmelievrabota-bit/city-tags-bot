@@ -1,4 +1,5 @@
-
+# bot.py — webhook-ready для PTB 21.4
+import os
 import json
 import logging
 import re
@@ -6,22 +7,33 @@ from pathlib import Path
 from typing import Optional
 
 from telegram import Update
-from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, filters, CommandHandler
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    MessageHandler,
+    ContextTypes,
+    filters,
+)
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger(__name__)
 
 CFG_PATH = Path("config.json")
 
+
 def load_config():
-    with CFG_PATH.open("r", encoding="utf-8") as f:
-        return json.load(f)
+    if CFG_PATH.exists():
+        with CFG_PATH.open("r", encoding="utf-8") as f:
+            return json.load(f)
+    return {}
+
 
 def extract_city_structured(text: str) -> Optional[str]:
     m = re.search(r"Город[:\s\-–]*([^\n,\\/]+)", text, flags=re.IGNORECASE)
     if m:
         return m.group(1).strip()
     return None
+
 
 def find_city_by_name(text: str, cities_list, ci=True) -> Optional[str]:
     txt = text.lower() if ci else text
@@ -31,12 +43,14 @@ def find_city_by_name(text: str, cities_list, ci=True) -> Optional[str]:
             return c
     return None
 
+
 async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message is None or update.message.text is None:
         return
 
-    cfg = context.bot_data["cfg"]
+    cfg = context.bot_data.get("cfg", {})
     allowed = cfg.get("allowed_chat_ids")
+    # если allowed пустой или не указан — слушаем все чаты
     if allowed and update.effective_chat.id not in allowed:
         return
 
@@ -45,7 +59,9 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     city = extract_city_structured(text)
     if not city:
-        city = find_city_by_name(text, list(cfg.get("cities", {}).keys()), cfg.get("match_case_insensitive", True))
+        city = find_city_by_name(
+            text, list(cfg.get("cities", {}).keys()), cfg.get("match_case_insensitive", True)
+        )
 
     if not city:
         return
@@ -78,20 +94,57 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         log.exception("Failed to reply: %s", e)
 
+
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Я слежу за объявлениями и буду упоминать людей по городам.")
 
+
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
+    log.exception("Error while handling update: %s", context.error)
+
+
 def main():
+    # Конфиг: либо из файла, либо (рекомендую для Render) из ENV
     cfg = load_config()
-    token = cfg["bot_token"]
+    token = os.environ.get("BOT_TOKEN") or cfg.get("bot_token")
+    if not token:
+        raise RuntimeError("BOT_TOKEN is not set")
+
+    # Build app
     app = ApplicationBuilder().token(token).build()
     app.bot_data["cfg"] = cfg
 
     app.add_handler(CommandHandler("start", start_cmd))
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), on_message))
+    app.add_error_handler(error_handler)
 
-    log.info("Starting bot")
-    app.run_polling()
+    # webhook settings
+    PORT = int(os.environ.get("PORT", 8443))
+    # public url - Render выдаёт URL вида https://<service>.onrender.com
+    # Зададим путь webhook = /{token} (безопаснее — уникален)
+    service_url = os.environ.get("SERVICE_URL")  # optional: явно указать https://...
+    if service_url:
+        public_url = service_url.rstrip("/")
+    else:
+        # подставь свой адрес Render, например: https://city-tags-bot.onrender.com
+        public_url = os.environ.get("RENDER_EXTERNAL_URL", "").rstrip("/") or ""
+
+    webhook_path = f"/{token}"
+    webhook_url = public_url + webhook_path if public_url else None
+
+    if webhook_url:
+        log.info("Using webhook url: %s", webhook_url)
+        app.run_webhook(
+            listen="0.0.0.0",
+            port=PORT,
+            webhook_url=webhook_url,
+            url_path=token
+        )
+    else:
+        # fallback — если публичного URL нет, делаем polling (локально)
+        log.warning("No public URL found; falling back to polling (not for Render)")
+        app.run_polling()
+
 
 if __name__ == "__main__":
     main()
