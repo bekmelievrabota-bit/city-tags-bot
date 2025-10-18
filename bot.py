@@ -20,7 +20,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-CONFIG_FILE = "config.json"  # или tags.json
+CONFIG_FILE = "config.json"
 with open(CONFIG_FILE, encoding="utf-8") as f:
     config = json.load(f)
 
@@ -59,7 +59,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # --------------------- Новый код для кнопок --------------------- #
 
 # Состояния для ConversationHandler
-ADD_CITY, ADD_TAG = range(2)
+WAIT_CITY_NAME, WAIT_TAG_NAME, WAIT_TAG_USERS = range(3)
 
 # Команда /menu
 async def start_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -70,50 +70,53 @@ async def start_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text("Что вы хотите сделать?", reply_markup=reply_markup)
 
-# Обработка нажатий кнопок
+# Обработка кнопок
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
     if query.data == "add_city":
-        context.user_data["action"] = "add_city"
         await query.message.reply_text("Введите название нового города:")
-        return ADD_CITY
+        return WAIT_CITY_NAME
     elif query.data == "add_tag":
-        context.user_data["action"] = "add_tag"
-        await query.message.reply_text("Введите тег для города (например: user1,user2):")
-        return ADD_TAG
+        await query.message.reply_text("Введите название города, к которому хотите добавить тег:")
+        return WAIT_TAG_NAME
 
-# Добавление города
+# Обработка нового города
 async def add_city(update: Update, context: ContextTypes.DEFAULT_TYPE):
     new_city = update.message.text.strip()
     if new_city in CITIES:
         await update.message.reply_text("Такой город уже существует!")
-        return ConversationHandler.END
-    CITIES[new_city] = []
-    # Обновляем regex
-    CITY_PATTERNS[new_city] = re.compile(re.escape(new_city), re.IGNORECASE if MATCH_CASE_INSENSITIVE else 0)
-    await update.message.reply_text(f"Город '{new_city}' добавлен.")
-    logger.info(f"Добавлен город: {new_city}")
+    else:
+        CITIES[new_city] = []
+        CITY_PATTERNS[new_city] = re.compile(
+            re.escape(new_city), re.IGNORECASE if MATCH_CASE_INSENSITIVE else 0
+        )
+        await update.message.reply_text(f"Город '{new_city}' добавлен.")
+        logger.info(f"Добавлен город: {new_city}")
     return ConversationHandler.END
 
-# Добавление тега к городу
-async def add_tag(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    tag_info = update.message.text.strip()
-    try:
-        city, users_str = tag_info.split(":", 1)  # формат "Город: user1,user2"
-        users = [u.strip() for u in users_str.split(",") if u.strip()]
-    except ValueError:
-        await update.message.reply_text("Неверный формат! Используйте 'Город: user1,user2'")
-        return ConversationHandler.END
-
+# Обработка ввода города для тега
+async def ask_tag_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    city = update.message.text.strip()
     if city not in CITIES:
         await update.message.reply_text("Такого города нет! Сначала добавьте город.")
         return ConversationHandler.END
+    context.user_data["tag_city"] = city
+    await update.message.reply_text(f"Введите пользователей для города '{city}' через запятую:")
+    return WAIT_TAG_USERS
 
+# Обработка пользователей для тега
+async def add_tag_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    city = context.user_data.get("tag_city")
+    if not city:
+        await update.message.reply_text("Ошибка: город не найден в данных.")
+        return ConversationHandler.END
+
+    users = [u.strip() for u in update.message.text.split(",") if u.strip()]
     CITIES[city].extend(users)
-    await update.message.reply_text(f"Теги {users} добавлены к городу '{city}'.")
-    logger.info(f"Добавлены теги к {city}: {users}")
+    await update.message.reply_text(f"Пользователи {users} добавлены к городу '{city}'.")
+    logger.info(f"Добавлены пользователи к {city}: {users}")
     return ConversationHandler.END
 
 def main():
@@ -129,8 +132,9 @@ def main():
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler("menu", start_menu), CallbackQueryHandler(button_handler)],
         states={
-            ADD_CITY: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_city)],
-            ADD_TAG: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_tag)],
+            WAIT_CITY_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_city)],
+            WAIT_TAG_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_tag_users)],
+            WAIT_TAG_USERS: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_tag_users)],
         },
         fallbacks=[],
         per_user=True,
