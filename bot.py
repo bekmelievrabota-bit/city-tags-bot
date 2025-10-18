@@ -1,180 +1,104 @@
 import json
 import logging
-import os
-from pathlib import Path
+import asyncio
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import (
-    ApplicationBuilder, ContextTypes,
-    CommandHandler, MessageHandler, filters,
-    CallbackQueryHandler
-)
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
 
-# ====== Логирование ======
+# Настройка логов
 logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
 )
-logger = logging.getLogger(__name__)
 
-# ====== Конфигурация ======
-CONFIG_PATH = Path(__file__).parent / "config.json"
+# Загрузка конфига
+CONFIG_FILE = 'config.json'
+with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
+    config = json.load(f)
 
-def load_config():
-    with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-        return json.load(f)
+BOT_TOKEN = config['bot_token']
+ALLOWED_CHAT_IDS = config['allowed_chat_ids']
+CITIES = config['cities']
+MATCH_CASE_INSENSITIVE = config.get('match_case_insensitive', True)
+ADMIN_IDS = [6742361886]  # Твой Telegram ID
 
-def save_config(config):
-    with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+# Сохраняем конфиг
+def save_config():
+    with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
         json.dump(config, f, ensure_ascii=False, indent=2)
 
-config = load_config()
-BOT_TOKEN = config["bot_token"]
-ALLOWED_CHAT_IDS = config["allowed_chat_ids"]
-CITIES = config["cities"]
-MATCH_CASE_INSENSITIVE = config.get("match_case_insensitive", True)
-ADMIN_IDS = [6742361886]  # твой ID для управления
+# Проверка администратора
+def is_admin(user_id: int):
+    return user_id in ADMIN_IDS
 
-# ====== Вспомогательные функции ======
-def normalize(text: str):
-    return text.lower() if MATCH_CASE_INSENSITIVE else text
-
-# ====== Команды ======
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "Привет! Я городской бот.\n"
-        "Если вы админ, используйте кнопки для управления городами и тегами."
-    )
-    if update.effective_user.id in ADMIN_IDS:
-        await show_admin_menu(update, context)
-
-async def show_admin_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = [
-        [InlineKeyboardButton("Добавить город", callback_data="admin:add_city")],
-        [InlineKeyboardButton("Удалить город", callback_data="admin:remove_city")],
-        [InlineKeyboardButton("Добавить тег", callback_data="admin:add_tag")],
-        [InlineKeyboardButton("Удалить тег", callback_data="admin:remove_tag")]
-    ]
-    await update.message.reply_text(
-        "Меню админа:", reply_markup=InlineKeyboardMarkup(keyboard)
-    )
-
-# ====== Callback для кнопок ======
-async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    data = query.data
-    user_id = query.from_user.id
-
-    if user_id not in ADMIN_IDS:
-        await query.edit_message_text("❌ У вас нет доступа к этой функции.")
-        return
-
-    # ===== Управление городами =====
-    if data == "admin:add_city":
-        await query.edit_message_text("Отправьте название нового города сообщением.")
-        context.user_data["action"] = "add_city"
-        return
-    if data == "admin:remove_city":
-        keyboard = [
-            [InlineKeyboardButton(name, callback_data=f"remove_city:{name}")]
-            for name in CITIES.keys()
-        ]
-        await query.edit_message_text("Выберите город для удаления:", reply_markup=InlineKeyboardMarkup(keyboard))
-        return
-    if data.startswith("remove_city:"):
-        city = data.split(":", 1)[1]
-        if city in CITIES:
-            del CITIES[city]
-            save_config(config)
-            await query.edit_message_text(f"✅ Город '{city}' удалён!")
-        return
-
-    # ===== Управление тегами =====
-    if data == "admin:add_tag":
-        await query.edit_message_text("Отправьте сообщение в формате: <город> <тег>")
-        context.user_data["action"] = "add_tag"
-        return
-    if data == "admin:remove_tag":
-        await query.edit_message_text("Отправьте сообщение в формате: <город> <тег> для удаления")
-        context.user_data["action"] = "remove_tag"
-        return
-
-# ====== Обработчик сообщений админа ======
+# Добавление/удаление городов и тегов
 async def handle_admin_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    if user_id not in ADMIN_IDS:
+    if not is_admin(user_id):
         return
 
     text = update.message.text.strip()
-    action = context.user_data.get("action")
+    chat_id = update.message.chat_id
 
-    if action == "add_city":
-        if text in CITIES:
-            await update.message.reply_text("Такой город уже существует.")
-        else:
-            CITIES[text] = []
-            save_config(config)
-            await update.message.reply_text(f"✅ Город '{text}' добавлен!")
-        context.user_data["action"] = None
-        return
-
-    if action in ["add_tag", "remove_tag"]:
-        parts = text.split(maxsplit=1)
-        if len(parts) != 2:
-            await update.message.reply_text("Ошибка формата. Используйте: <город> <тег>")
+    # Команды добавления
+    if text.startswith('/add_city '):
+        parts = text.split(' ', 2)
+        if len(parts) < 3:
+            await update.message.reply_text("Используй /add_city <Город> <@тег>")
             return
-        city, tag = parts
+        city, tag = parts[1], parts[2]
         if city not in CITIES:
-            await update.message.reply_text("Такого города нет.")
+            CITIES[city] = []
+        if tag not in CITIES[city]:
+            CITIES[city].append(tag)
+        save_config()
+        await update.message.reply_text(f"Добавлен {tag} в город {city}")
+        return
+
+    if text.startswith('/remove_city '):
+        parts = text.split(' ', 2)
+        if len(parts) < 3:
+            await update.message.reply_text("Используй /remove_city <Город> <@тег>")
+            return
+        city, tag = parts[1], parts[2]
+        if city in CITIES and tag in CITIES[city]:
+            CITIES[city].remove(tag)
+            if not CITIES[city]:
+                del CITIES[city]
+            save_config()
+            await update.message.reply_text(f"Удален {tag} из города {city}")
+        else:
+            await update.message.reply_text("Такого города или тега нет")
+        return
+
+# Автоответ на отклики
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message.chat_id not in ALLOWED_CHAT_IDS:
+        return
+
+    text = update.message.text
+    # Проверка на соответствие городам
+    for city, tags in CITIES.items():
+        if (text.lower() if MATCH_CASE_INSENSITIVE else text) == (city.lower() if MATCH_CASE_INSENSITIVE else city):
+            reply_text = ', '.join(tags) + f", #{city}"
+            await update.message.reply_text(reply_text, reply_to_message_id=update.message.message_id)
             return
 
-        if action == "add_tag":
-            if tag in CITIES[city]:
-                await update.message.reply_text("Такой тег уже есть.")
-            else:
-                CITIES[city].append(tag)
-                save_config(config)
-                await update.message.reply_text(f"✅ Тег '{tag}' добавлен в город '{city}'!")
-        elif action == "remove_tag":
-            if tag not in CITIES[city]:
-                await update.message.reply_text("Такого тега нет.")
-            else:
-                CITIES[city].remove(tag)
-                save_config(config)
-                await update.message.reply_text(f"✅ Тег '{tag}' удалён из города '{city}'!")
-        context.user_data["action"] = None
+async def main():
+    app = Application.builder().token(BOT_TOKEN).build()
 
-# ====== Обработчик сообщений в группах ======
-async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_chat.id not in ALLOWED_CHAT_IDS:
-        return
-    text_norm = normalize(update.message.text)
-    for city, tags in CITIES.items():
-        for tag in tags:
-            if normalize(tag) in text_norm:
-                await update.message.reply_text(f"{tag}, #{city}")
+    # Обработчики
+    app.add_handler(MessageHandler(filters.TEXT & filters.ChatType.PRIVATE, handle_admin_message))
+    app.add_handler(MessageHandler(filters.TEXT & filters.ChatType.GROUPS, handle_message))
 
-# ====== Основная функция ======
-def main():
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    # Запуск webhook
+    PORT = 8000
+    URL = f"https://city-tags-bot.onrender.com/{BOT_TOKEN}"
+    await app.initialize()
+    await app.start()
+    await app.bot.set_webhook(URL)
+    logging.info(f"🚀 Бот запущен на webhook: {URL}")
 
-    # Команды
-    app.add_handler(CommandHandler("start", start))
+    await asyncio.Event().wait()  # держим приложение живым
 
-    # Callback кнопки
-    app.add_handler(CallbackQueryHandler(button_callback))
-
-    # Сообщения
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_admin_message))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_group_message))
-
-    # Webhook
-    PORT = int(os.environ.get("PORT", 8000))
-    app.run_webhook(
-        listen="0.0.0.0",
-        port=PORT,
-        url_path=BOT_TOKEN,
-        webhook_url=f"https://city-tags-bot.onrender.com/{BOT_TOKEN}"
-    )
-
-if __name__ == "__main__":
-    main()
+if name == '__main__':
+    asyncio.run(main())
