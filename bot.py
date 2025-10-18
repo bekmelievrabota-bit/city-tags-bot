@@ -153,3 +153,71 @@ def main():
 
 if __name__ == "__main__":
     main()
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import ConversationHandler, CallbackQueryHandler, CommandHandler, MessageHandler, filters
+
+# состояния
+WAIT_CITY_NAME, WAIT_TAG = range(2)
+
+# меню с кнопками
+async def menu_command(update, context):
+    keyboard = [
+        [InlineKeyboardButton("Добавить город", callback_data="add_city")],
+        [InlineKeyboardButton("Добавить тег", callback_data="add_tag")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_text("Что хотите сделать?", reply_markup=reply_markup)
+    return WAIT_CITY_NAME  # ждем выбора кнопки
+
+# обработка нажатий кнопок
+async def button_handler(update, context):
+    query = update.callback_query
+    await query.answer()
+    if query.data == "add_city":
+        await query.message.reply_text("Введите название нового города:")
+        context.user_data["action"] = "city"
+        return WAIT_CITY_NAME
+    elif query.data == "add_tag":
+        await query.message.reply_text("Введите город, к которому хотите добавить тег:")
+        context.user_data["action"] = "tag"
+        return WAIT_TAG
+    return WAIT_CITY_NAME
+
+# обработка введенного текста
+async def text_input(update, context):
+    action = context.user_data.get("action")
+    text = update.message.text.strip()
+    if action == "city":
+        # здесь можно добавить город в конфиг или просто логировать
+        CITIES[text] = []
+        await update.message.reply_text(f"Город '{text}' добавлен ✅")
+    elif action == "tag":
+        # ожидаем ввода "город:тег" например
+        try:
+            city, tag = map(str.strip, text.split(":"))
+            if city in CITIES:
+                CITIES[city].append(tag)
+                await update.message.reply_text(f"Тег '{tag}' добавлен к городу '{city}' ✅")
+            else:
+                await update.message.reply_text(f"Город '{city}' не найден ❌")
+        except:
+            await update.message.reply_text("Неверный формат! Используйте: город:тег")
+    # возвращаем меню
+    await menu_command(update, context)
+    return WAIT_CITY_NAME
+
+# создаем ConversationHandler
+menu_conv_handler = ConversationHandler(
+    entry_points=[CommandHandler("menu", menu_command)],
+    states={
+        WAIT_CITY_NAME: [
+            CallbackQueryHandler(button_handler),
+            MessageHandler(filters.TEXT & ~filters.COMMAND, text_input)
+        ],
+        WAIT_TAG: [MessageHandler(filters.TEXT & ~filters.COMMAND, text_input)],
+    },
+    fallbacks=[CommandHandler("menu", menu_command)],
+)
+
+# подключаем к приложению
+application.add_handler(menu_conv_handler)
