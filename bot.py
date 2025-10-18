@@ -59,90 +59,99 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # --------------------- Новый код для кнопок --------------------- #
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ConversationHandler, CallbackQueryHandler, CommandHandler, MessageHandler, filters
-
-WAIT_ACTION, WAIT_INPUT = range(2)
-
-async def menu_command(update, context):
-    keyboard = [
-        [InlineKeyboardButton("Добавить город", callback_data="add_city"),
-         InlineKeyboardButton("Удалить город", callback_data="remove_city")],
-        [InlineKeyboardButton("Добавить тег", callback_data="add_tag"),
-         InlineKeyboardButton("Удалить тег", callback_data="remove_tag")]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text("Выберите действие:", reply_markup=reply_markup)
-    return WAIT_ACTION
-
-async def button_handler(update, context):
-    query = update.callback_query
-    await query.answer()
-    context.user_data["action"] = query.data
-    if query.data in ["add_city", "remove_city"]:
-        await query.message.reply_text("Введите название города:")
-    elif query.data in ["add_tag", "remove_tag"]:
-        await query.message.reply_text("Введите город и тег через двоеточие, например: Москва:Проверка")
-    return WAIT_INPUT
-
-async def text_input(update, context):
-    text = update.message.text.strip()
-    action = context.user_data.get("action")
-
-    if action == "add_city":
-        if text in CITIES:
-            await update.message.reply_text(f"Город '{text}' уже существует ❌")
-        else:
-            CITIES[text] = []
-            CITY_PATTERNS[text] = re.compile(re.escape(text), re.IGNORECASE if MATCH_CASE_INSENSITIVE else 0)
-            await update.message.reply_text(f"Город '{text}' добавлен ✅")
-
-    elif action == "remove_city":
-        if text in CITIES:
-            del CITIES[text]
-            del CITY_PATTERNS[text]
-            await update.message.reply_text(f"Город '{text}' удален ✅")
-        else:
-            await update.message.reply_text(f"Город '{text}' не найден ❌")
-
-    elif action == "add_tag":
-        try:
-            city, tag = map(str.strip, text.split(":"))
-            if city in CITIES:
-                if tag in CITIES[city]:
-                    await update.message.reply_text(f"Тег '{tag}' уже существует для города '{city}' ❌")
-                else:
-                    CITIES[city].append(tag)
-                    await update.message.reply_text(f"Тег '{tag}' добавлен к городу '{city}' ✅")
-            else:
-                await update.message.reply_text(f"Город '{city}' не найден ❌")
-        except:
-            await update.message.reply_text("Неверный формат! Используйте: город:тег")
-
-    elif action == "remove_tag":
-        try:
-            city, tag = map(str.strip, text.split(":"))
-            if city in CITIES and tag in CITIES[city]:
-                CITIES[city].remove(tag)
-                await update.message.reply_text(f"Тег '{tag}' удален у города '{city}' ✅")
-            else:
-                await update.message.reply_text(f"Город или тег не найден ❌")
-        except:
-            await update.message.reply_text("Неверный формат! Используйте: город:тег")
-
-    # Возвращаем меню после действия
-    await menu_command(update, context)
-    return WAIT_ACTION
-
-# ================= ConversationHandler =================
-menu_conv_handler = ConversationHandler(
-    entry_points=[CommandHandler("menu", menu_command)],
-    states={
-        WAIT_ACTION: [CallbackQueryHandler(button_handler)],
-        WAIT_INPUT: [MessageHandler(filters.TEXT & ~filters.COMMAND, text_input)],
-    },
-    fallbacks=[CommandHandler("menu", menu_command)],
-    per_message=True  # <--- добавляем, чтобы убрать предупреждение
+from telegram.ext import (
+    ConversationHandler,
+    CallbackQueryHandler,
+    MessageHandler,
+    filters,
 )
 
-# ================= В main добавляем =================
-# application.add_handler(menu_conv_handler)
+# Состояния для меню
+CHOOSING, TYPING_CITY, TYPING_TAG = range(3)
+
+def menu_keyboard():
+    keyboard = [
+        [InlineKeyboardButton("Добавить город", callback_data="add_city")],
+        [InlineKeyboardButton("Добавить тег", callback_data="add_tag")],
+        [InlineKeyboardButton("Удалить город", callback_data="remove_city")],
+        [InlineKeyboardButton("Удалить тег", callback_data="remove_tag")],
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+async def menu_start(update, context):
+    await update.message.reply_text(
+        "Выберите действие:", reply_markup=menu_keyboard()
+    )
+    return CHOOSING
+
+async def menu_choice(update, context):
+    query = update.callback_query
+    await query.answer()
+    choice = query.data
+
+    if choice == "add_city":
+        await query.message.reply_text("Введите название города для добавления:")
+        return TYPING_CITY
+    elif choice == "add_tag":
+        await query.message.reply_text("Введите тег для добавления:")
+        return TYPING_TAG
+    elif choice == "remove_city":
+        await query.message.reply_text("Введите название города для удаления:")
+        return TYPING_CITY
+    elif choice == "remove_tag":
+        await query.message.reply_text("Введите тег для удаления:")
+        return TYPING_TAG
+
+async def received_text(update, context):
+    text = update.message.text.strip()
+
+    # Проверяем, что это город или тег
+    if context.user_data.get("state") == "city":
+        if text in CITIES:
+            # удаление
+            del CITIES[text]
+            await update.message.reply_text(f"Город {text} удалён.")
+        else:
+            # добавление
+            CITIES[text] = []
+            await update.message.reply_text(f"Город {text} добавлен.")
+    elif context.user_data.get("state") == "tag":
+        # Обработка тегов аналогично (можно хранить список TAGS)
+        TAGS = context.bot_data.setdefault("tags", [])
+        if text in TAGS:
+            TAGS.remove(text)
+            await update.message.reply_text(f"Тег {text} удалён.")
+        else:
+            TAGS.append(text)
+            await update.message.reply_text(f"Тег {text} добавлен.")
+
+    # После обработки возвращаемся в меню
+    await update.message.reply_text("Выберите действие:", reply_markup=menu_keyboard())
+    return CHOOSING
+
+async def set_state_city(update, context):
+    context.user_data["state"] = "city"
+
+async def set_state_tag(update, context):
+    context.user_data["state"] = "tag"
+
+# ConversationHandler для меню
+menu_conv_handler = ConversationHandler(
+    entry_points=[CommandHandler("menu", menu_start)],
+    states={
+        CHOOSING: [CallbackQueryHandler(menu_choice)],
+        TYPING_CITY: [
+            MessageHandler(filters.TEXT & ~filters.COMMAND, set_state_city),
+            MessageHandler(filters.TEXT & ~filters.COMMAND, received_text),
+        ],
+        TYPING_TAG: [
+            MessageHandler(filters.TEXT & ~filters.COMMAND, set_state_tag),
+            MessageHandler(filters.TEXT & ~filters.COMMAND, received_text),
+        ],
+    },
+    fallbacks=[],
+    per_message=False,
+)
+
+# Добавляем обработчик в приложение
+application.add_handler(menu_conv_handler)
