@@ -7,7 +7,7 @@ from telegram.ext import (
 )
 
 # ======================
-# Логирование
+# Настройка логирования
 # ======================
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -16,13 +16,13 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ======================
-# Загрузка config.json
+# Загрузка конфигурации
 # ======================
 with open("config.json", "r", encoding="utf-8") as f:
     config = json.load(f)
 
-BOT_TOKEN = config["bot_token"]
-ALLOWED_CHAT_IDS = config.get("allowed_chat_ids", [])
+TOKEN = config["bot_token"]
+ALLOWED_CHAT_IDS = config.get("allowed_chat_ids")  # None = разрешить все чаты
 CITIES = config.get("cities", {})
 MATCH_CASE_INSENSITIVE = config.get("match_case_insensitive", True)
 
@@ -32,77 +32,87 @@ MATCH_CASE_INSENSITIVE = config.get("match_case_insensitive", True)
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     if ALLOWED_CHAT_IDS and chat_id not in ALLOWED_CHAT_IDS:
+        logger.warning(f"Доступ запрещён для чата {chat_id}")
         return
-    logger.info(f"/start вызван пользователем {update.effective_user.id}")
+
     await update.message.reply_text(
         "Привет! Я бот и теперь работаю в личке и в группах!"
     )
+    logger.info(f"/start вызван пользователем {update.effective_user.id} в чате {chat_id}")
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     if ALLOWED_CHAT_IDS and chat_id not in ALLOWED_CHAT_IDS:
         return
-    await update.message.reply_text(
+
+    commands_text = (
         "Список команд:\n"
         "/start - начать работу\n"
-        "/help - показать это сообщение"
+        "/help - показать это сообщение\n\n"
+        "Просто напишите название города, и я покажу теги HR."
     )
+    await update.message.reply_text(commands_text)
 
 # ======================
 # Обработка текстовых сообщений
 # ======================
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
-    if ALLOWED_CHAT_IDS and chat_id not in ALLOWED_CHAT_IDS:
-        return
-
     user_id = update.effective_user.id
     username = update.effective_user.username
     text = update.message.text
-    logger.info(f"Сообщение от {username} ({user_id}): {text}")
 
-    response_tags = []
+    # Проверяем доступ
+    if ALLOWED_CHAT_IDS and chat_id not in ALLOWED_CHAT_IDS:
+        logger.warning(f"Сообщение от запрещённого чата {chat_id}")
+        return
 
-    # Поиск городов в сообщении
+    logger.info(f"Сообщение от {username} ({user_id}) в чате {chat_id}: {text}")
+
+    # Поиск тегов города
+    result = None
     for city, tags in CITIES.items():
         if MATCH_CASE_INSENSITIVE:
-            if city.lower() in text.lower():
-                response_tags.extend(tags)
+            if text.lower() == city.lower():
+                result = tags
+                break
         else:
-            if city in text:
-                response_tags.extend(tags)
+            if text == city:
+                result = tags
+                break
 
-    if response_tags:
-        await update.message.reply_text(
-            " ".join(response_tags)
-        )
+    if result:
+        reply = f"Теги HR для города {text}: {', '.join(result)}"
     else:
-        await update.message.reply_text(f"Вы написали: {text}")
+        reply = f"Не удалось найти город '{text}'. Попробуйте другой."
+
+    await update.message.reply_text(reply)
 
 # ======================
 # Основная функция
 # ======================
 def main():
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    PORT = int(os.environ.get("PORT", 8000))
+    app = ApplicationBuilder().token(TOKEN).build()
 
     # Обработчики команд
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
 
-    # Обработка текстовых сообщений
+    # Обработчик текстовых сообщений
     app.add_handler(MessageHandler(
         filters.TEXT & ~filters.COMMAND,
         handle_message
     ))
 
-    # Порт для Render
-    port = int(os.environ.get("PORT", 8000))
+    logger.info(f"Webhook URL: https://city-tags-bot.onrender.com/{TOKEN}")
+    logger.info(f"Allowed chat ids: {ALLOWED_CHAT_IDS}")
 
     # Запуск вебхука
     app.run_webhook(
         listen="0.0.0.0",
-        port=port,
-        webhook_url=f"https://city-tags-bot.onrender.com/{BOT_TOKEN}"
+        port=PORT,
+        webhook_url=f"https://city-tags-bot.onrender.com/{TOKEN}"
     )
 
 if __name__ == "__main__":
