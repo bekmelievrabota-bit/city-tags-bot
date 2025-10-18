@@ -1,300 +1,194 @@
-# bot.py
-import os
 import json
 import logging
-import re
-from pathlib import Path
-from typing import Optional, List, Dict
+import os
+from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
 
-from telegram import Update
-from telegram.ext import (
-    ApplicationBuilder,
-    ContextTypes,
-    MessageHandler,
-    CommandHandler,
-    filters,
-)
-
-# ------------------------
-# Настройка логирования
-# ------------------------
+# ---------------- ЛОГИ ---------------- #
 logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-# ------------------------
-# Конфиг
-# ------------------------
-CFG_PATH = Path("config.json")
+# ---------------- КОНФИГ ---------------- #
+CONFIG_PATH = "config.json"
 
-
-def load_config() -> Dict:
-    if not CFG_PATH.exists():
-        logger.error("config.json не найден в рабочей директории.")
-        raise SystemExit("config.json required")
-    with CFG_PATH.open("r", encoding="utf-8") as f:
-        return json.load(f)
-
-
-def save_config(cfg: Dict):
-    with CFG_PATH.open("w", encoding="utf-8") as f:
-        json.dump(cfg, f, ensure_ascii=False, indent=2)
-    logger.info("config.json сохранён.")
-
-
-# ------------------------
-# Поиск города в тексте
-# ------------------------
-def extract_city_structured(text: str) -> Optional[str]:
-    """
-    Ищет явную строку "Город: <город,...>" в теле сообщения.
-    """
-    m = re.search(r"Город[:\s\-–]*([^\n,\\/]+)", text, flags=re.IGNORECASE)
-    if m:
-        return m.group(1).strip()
-    return None
-
-
-def find_city_by_name(text: str, cities_list: List[str], ci=True) -> Optional[str]:
-    txt = text.lower() if ci else text
-    for c in cities_list:
-        key = c.lower() if ci else c
-        # \b может не срабатывать для кириллицы в некоторых краях, но обычно ок
-        if re.search(rf"\b{re.escape(key)}\b", txt):
-            return c
-    return None
-
-
-# ------------------------
-# Business: формируем ответ (теги + хештег)
-# ------------------------
-def make_reply_for_city(city_key: str, cfg: Dict) -> Optional[str]:
-    cities_map = cfg.get("cities", {})
-    # ищем точный ключ в конфиге с учётом регистра
-    matched_key = None
-    for k in cities_map.keys():
-        if k.lower() == city_key.lower():
-            matched_key = k
-            break
-    if not matched_key:
-        for k in cities_map.keys():
-            if city_key.lower() in k.lower():
-                matched_key = k
-                break
-    if not matched_key:
-        return None
-    users = cities_map.get(matched_key, [])
-    if not users:
-        return None
-    mention_text = " ".join(users)
-    hashtag = f"#{matched_key.replace(' ', '')}"
-    return f"{mention_text}, {hashtag}"
-
-
-# ------------------------
-# Хэндлеры
-# ------------------------
-async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "Бот живой. Я слежу за откликами и буду упоминать ответственных по городам."
-    )
-
-
-async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "/start — старт\n"
-        "/help — помощь\n\n"
-        "Админ-команды (только в личке для админов):\n"
-        "/addcity <Город> <@user1,@user2,...> — добавить город\n"
-        "/delcity <Город> — удалить город\n"
-        "/listcities — показать карту город->теги\n"
-    )
-
-
-# Приват: управление картой городов (только для админов)
-def is_admin(user_id: int, cfg: Dict) -> bool:
-    # Если указан отдельный список admin_ids — используем его
-    if cfg.get("admin_ids"):
-        return user_id in cfg.get("admin_ids", [])
-    # Иначе считаем положительные ID в allowed_chat_ids (личные) админами
-    allowed = cfg.get("allowed_chat_ids", [])
-    # часто group IDs negative or -100..., personal IDs positive — возьмём положительные
-    admins_guess = [i for i in allowed if isinstance(i, int) and i > 0]
-    return user_id in admins_guess
-
-
-async def addcity_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    cfg = context.bot_data["cfg"]
-    uid = update.effective_user.id
-    if not is_admin(uid, cfg):
-        await update.message.reply_text("Ты не админ — у тебя нет прав для этой команды.")
-        return
-
-    # Текст: /addcity Город @user1,@user2
-    args = context.args
-    if len(args) < 2:
-        await update.message.reply_text("Использование: /addcity <Город> <@u1,@u2,...>")
-        return
-    city = args[0].strip()
-    # остальные аргументы — можем объединить и разбить по запятым
-    users_txt = " ".join(args[1:])
-    # допустимо разделять запятыми или пробелами
-    users = re.split(r"[,\s]+", users_txt.strip())
-    users = [u for u in users if u]
-    cfg.setdefault("cities", {})[city] = users
-    save_config(cfg)
-    await update.message.reply_text(f"Город добавлен/обновлён: {city} -> {users}")
-
-
-async def delcity_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    cfg = context.bot_data["cfg"]
-    uid = update.effective_user.id
-    if not is_admin(uid, cfg):
-        await update.message.reply_text("Ты не админ — у тебя нет прав для этой команды.")
-        return
-    if not context.args:
-        await update.message.reply_text("Использование: /delcity <Город>")
-        return
-    city = context.args[0].strip()
-    if city in cfg.get("cities", {}):
-        cfg["cities"].pop(city)
-        save_config(cfg)
-        await update.message.reply_text(f"Город удалён: {city}")
-    else:
-        await update.message.reply_text("Город не найден в конфиге.")
-
-
-async def listcities_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    cfg = context.bot_data["cfg"]
-    uid = update.effective_user.id
-    if not is_admin(uid, cfg):
-        await update.message.reply_text("Ты не админ — у тебя нет прав для этой команды.")
-        return
-    cities = cfg.get("cities", {})
-    if not cities:
-        await update.message.reply_text("Список городов пуст.")
-        return
-    lines = []
-    for k, v in cities.items():
-        lines.append(f"{k}: {' '.join(v)}")
-    # Telegram limits message length, но это коротко
-    await update.message.reply_text("\n".join(lines))
-
-
-# Главный обработчик текстовых сообщений
-async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Нам нужен только текст
-    if update.message is None or update.message.text is None:
-        return
-
-    cfg = context.bot_data["cfg"]
-    allowed = cfg.get("allowed_chat_ids", [])
-    chat_id = update.effective_chat.id
-
-    # Проверяем разрешён ли этот чат вообще
-    if allowed and chat_id not in allowed:
-        logger.debug("Чат %s не в allowed_chat_ids — игнорирую.", chat_id)
-        return
-
-    text = update.message.text
-    logger.info("Новое сообщение в %s: %s", chat_id, text[:120])
-
-    # Нам нужна структура "отклик" — ищем город явным образом или по названию в списке
-    city = extract_city_structured(text)
-    if not city:
-        city = find_city_by_name(text, list(cfg.get("cities", {}).keys()), cfg.get("match_case_insensitive", True))
-
-    if not city:
-        # ничего не понимаем — пропускаем
-        logger.debug("Не нашли город в тексте.")
-        return
-
-    reply_text = make_reply_for_city(city, cfg)
-    if not reply_text:
-        logger.debug("Нет ответственных для найденного города '%s'.", city)
-        return
-
+def load_config():
     try:
-        # Отвечаем как reply на текущее сообщение (так будет видно контекст)
-        await update.message.reply_text(reply_text)
-        logger.info("Ответ отправлен: %s", reply_text)
+        with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+            return json.load(f)
     except Exception as e:
-        logger.exception("Не удалось отправить ответ: %s", e)
+        logger.error(f"Ошибка загрузки config.json: {e}")
+        return {}
 
+config = load_config()
+BOT_TOKEN = config.get("bot_token")
+ALLOWED_CHAT_IDS = config.get("allowed_chat_ids", [])
+CITIES = config.get("cities", {})
+MATCH_CASE_INSENSITIVE = config.get("match_case_insensitive", True)
 
-# ------------------------
-# Запуск приложения (webhook)
-# ------------------------
-def build_app(cfg: Dict):
-    token = cfg.get("bot_token")
-    if not token:
-        logger.error("bot_token отсутствует в config.json")
-        raise SystemExit("bot_token required")
+ADMIN_ID = 6742361886  # твой ID
 
-    app = ApplicationBuilder().token(token).build()
-    app.bot_data["cfg"] = cfg
+# ---------------- СЕРДЦЕ БОТА ---------------- #
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "Привет! Я бот для откликов.\n"
+        "Доступные команды:\n"
+        "/add_city — добавить город\n"
+        "/remove_city — удалить город\n"
+        "/add_tag — добавить тег\n"
+        "/remove_tag — удалить тег"
+    )
 
-    # Команды
-    app.add_handler(CommandHandler("start", start_cmd))
-    app.add_handler(CommandHandler("help", help_cmd))
-    app.add_handler(CommandHandler("addcity", addcity_cmd))
-    app.add_handler(CommandHandler("delcity", delcity_cmd))
-    app.add_handler(CommandHandler("listcities", listcities_cmd))
+# --- Админ-проверка ---
+def is_admin(user_id: int) -> bool:
+    return user_id == ADMIN_ID
 
-    # Все текстовые сообщения (кроме команд)
-    app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), on_message))
-    return app
+# --- Кнопки ---
+def main_menu():
+    keyboard = [
+        [InlineKeyboardButton("➕ Добавить город", callback_data="add_city")],
+        [InlineKeyboardButton("➖ Удалить город", callback_data="remove_city")],
+        [InlineKeyboardButton("➕ Добавить тег", callback_data="add_tag")],
+        [InlineKeyboardButton("➖ Удалить тег", callback_data="remove_tag")],
+    ]
+    return InlineKeyboardMarkup(keyboard)
 
+# --- Callback от кнопок ---
+async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
 
-async def main():
-    cfg = load_config()
-    token = cfg["bot_token"]
+    if not is_admin(query.from_user.id):
+        await query.edit_message_text("⛔ Только админ может управлять данными.")
+        return
 
-    # Порт и URL (Render предоставляет RENDER_EXTERNAL_URL, порт в PORT)
-    PORT = int(os.environ.get("PORT", os.environ.get("RENDER_PORT", 8000)))
-    render_url = os.environ.get("RENDER_EXTERNAL_URL") or os.environ.get("WEBHOOK_BASE_URL")
-    if not render_url:
-        logger.warning(
-            "Переменная окружения RENDER_EXTERNAL_URL не установлена. "
-            "Нужно добавить вручную в Render: RENDER_EXTERNAL_URL = https://your-service.onrender.com"
-        )
+    action = query.data
+    context.user_data["action"] = action
+    await query.edit_message_text(f"Введите данные для {action.replace('_', ' ')}:")
 
-    app = build_app(cfg)
+# --- Обновление конфигурации ---
+def save_config():
+    with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+        json.dump(config, f, ensure_ascii=False, indent=2)
 
-    # Сформируем webhook-url (используем путь с токеном, чтобы не открывать публичный endpoint)
-    if render_url:
-        webhook_url = f"{render_url.rstrip('/')}/{token}"
-    else:
-        # fallback (если не указан render_url — будет попытка установить webhook по токену, возможно не сработает)
-        webhook_url = f"https://{os.environ.get('HOSTNAME','localhost')}/{token}"
+# --- Обработка добавления/удаления ---
+async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message = update.message
+    chat_id = message.chat_id
+    text = message.text.strip()
 
-    logger.info("Webhook URL: %s", webhook_url)
-    # Запуск вебхука (параметры совместимы с python-telegram-bot[webhooks])
-    try:
-        # Для Render обычно подходят эти аргументы
-        app.run_webhook(
-            listen="0.0.0.0",
-            port=PORT,
-            url_path=token,  # путь, который telegram будет постить: https://host/<token>
-            webhook_url=webhook_url,
-        )
-    except TypeError:
-        # на случай различий API (более старые/новые версии) — пробуем альтернативный подход:
-        logger.exception("run_webhook вызвал TypeError — пробую простой запуск")
-        await app.initialize()
-        await app.bot.set_webhook(webhook_url)
-        logger.info("Webhook установлен вручную: %s", webhook_url)
-        await app.start()
-        await app.updater.start_webhook(listen="0.0.0.0", port=PORT, url_path=token)
-        await app.updater.idle()
+    if chat_id not in ALLOWED_CHAT_IDS and update.effective_user.id != ADMIN_ID:
+        return
 
+    # Режим админки
+    action = context.user_data.get("action")
+    if action:
+        if not is_admin(update.effective_user.id):
+            await message.reply_text("⛔ У тебя нет прав.")
+            return
 
+        if action == "add_city":
+            parts = text.split(maxsplit=1)
+            if len(parts) == 2:
+                city, tags_str = parts
+                tags = tags_str.split()
+                config["cities"][city] = tags
+                save_config()
+                await message.reply_text(f"✅ Город {city} добавлен с тегами: {', '.join(tags)}")
+            else:
+                await message.reply_text("⚠ Формат: Город @тег1 @тег2")
+        elif action == "remove_city":
+            if text in config["cities"]:
+                del config["cities"][text]
+                save_config()
+                await message.reply_text(f"🗑 Город {text} удалён.")
+            else:
+                await message.reply_text("❌ Такого города нет.")
+        elif action == "add_tag":
+            found = False
+            for city, tags in config["cities"].items():
+                if city.lower() in text.lower():
+                    tag = text.split()[-1]
+                    if tag not in tags:
+                        tags.append(tag)
+                        save_config()
+                        await message.reply_text(f"✅ Тег {tag} добавлен в город {city}")
+                    else:
+                        await message.reply_text("⚠ Такой тег уже есть.")
+                    found = True
+                    break
+            if not found:
+                await message.reply_text("❌ Город не найден в конфиге.")
+        elif action == "remove_tag":
+            found = False
+            for city, tags in config["cities"].items():
+                if city.lower() in text.lower():
+                    tag = text.split()[-1]
+                    if tag in tags:
+                        tags.remove(tag)
+                        save_config()
+                        await message.reply_text(f"🗑 Тег {tag} удалён из города {city}")
+                    else:
+                        await message.reply_text("❌ Тег не найден.")
+                    found = True
+                    break
+            if not found:
+                await message.reply_text("❌ Город не найден в конфиге.")
+        context.user_data["action"] = None
+        return
+
+    # Основная логика — отклики
+    lowered = text.lower() if MATCH_CASE_INSENSITIVE else text
+    if any(word in lowered for word in ["отправил отклик", "откликнулся", "отклик"]):
+        for city, tags in config["cities"].items():
+            if city.lower() in lowered:
+                mention_str = " ".join(tags)
+                await message.reply_text(
+                    f"{mention_str} #{city.replace(' ', '_')}",
+                    reply_to_message_id=message.message_id
+                )
+                logger.info(f"Ответ для города {city}: {mention_str}")
+                return
+        await message.reply_text("⚠ Не удалось определить город. Проверь сообщение.")
+
+# --- Команды ---
+async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("⛔ У тебя нет прав.")
+        return
+    await update.message.reply_text("Панель управления:", reply_markup=main_menu())
+
+# ---------------- ЗАПУСК ---------------- #
 if __name__ == "__main__":
-    import asyncio
+    app = Application.builder().token(BOT_TOKEN).build()
 
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        logger.info("Остановлено пользователем")
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("panel", admin_panel))
+    app.add_handler(CallbackQueryHandler(button))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+
+    PORT = int(os.environ.get("PORT", 8443))
+    WEBHOOK_URL = f"https://{os.environ.get('RENDER_EXTERNAL_HOSTNAME')}"  # Render генерирует домен
+
+    async def run():
+        if WEBHOOK_URL and "render" in WEBHOOK_URL:
+            try:
+                logger.info(f"Устанавливаю webhook: {WEBHOOK_URL}")
+                await app.bot.set_webhook(url=f"{WEBHOOK_URL}")
+                await app.run_webhook(
+                    listen="0.0.0.0",
+                    port=PORT,
+                    url_path="",
+                    webhook_url=WEBHOOK_URL
+                )
+            except Exception as e:
+                logger.error(f"Ошибка вебхука: {e}, включаю polling...")
+                await app.run_polling()
+        else:
+            logger.warning("Render-домен не найден, запускаю polling.")
+            await app.run_polling()
+
+    import asyncio
+    asyncio.run(run())
