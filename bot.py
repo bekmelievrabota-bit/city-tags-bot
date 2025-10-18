@@ -69,3 +69,116 @@ def main():
 
 if __name__ == "__main__":
     main()
+# Меню с кнопками для управления городами и тегами
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import CallbackQueryHandler, ConversationHandler
+
+# Состояния для меню
+CHOOSING_ACTION, ADD_CITY, ADD_TAG, REMOVE_CITY, REMOVE_TAG = range(5)
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Открывает меню при /start"""
+    keyboard = [
+        [InlineKeyboardButton("➕ Добавить город", callback_data="add_city")],
+        [InlineKeyboardButton("➕ Добавить тег", callback_data="add_tag")],
+        [InlineKeyboardButton("➖ Удалить город", callback_data="remove_city")],
+        [InlineKeyboardButton("➖ Удалить тег", callback_data="remove_tag")],
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_text("Выберите действие:", reply_markup=reply_markup)
+    return CHOOSING_ACTION
+
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка нажатий кнопок"""
+    query = update.callback_query
+    await query.answer()
+
+    if query.data == "add_city":
+        await query.edit_message_text("Введите название нового города:")
+        context.user_data["action"] = "add_city"
+        return ADD_CITY
+
+    elif query.data == "add_tag":
+        await query.edit_message_text("Введите название нового тега:")
+        context.user_data["action"] = "add_tag"
+        return ADD_TAG
+
+    elif query.data == "remove_city":
+        await query.edit_message_text("Введите название города для удаления:")
+        context.user_data["action"] = "remove_city"
+        return REMOVE_CITY
+
+    elif query.data == "remove_tag":
+        await query.edit_message_text("Введите тег для удаления:")
+        context.user_data["action"] = "remove_tag"
+        return REMOVE_TAG
+
+async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Добавляет или удаляет данные после ввода текста"""
+    user_input = update.message.text.strip()
+    action = context.user_data.get("action")
+
+    if not action:
+        await update.message.reply_text("Используйте /start, чтобы открыть меню.")
+        return ConversationHandler.END
+
+    # Работа с config.json
+    with open(CONFIG_FILE, encoding="utf-8") as f:
+        config = json.load(f)
+
+    if action == "add_city":
+        if user_input not in config["cities"]:
+            config["cities"][user_input] = []
+            await update.message.reply_text(f"✅ Город {user_input} добавлен.")
+        else:
+            await update.message.reply_text("⚠️ Такой город уже есть.")
+
+    elif action == "add_tag":
+        last_city = list(config["cities"].keys())[-1] if config["cities"] else None
+        if last_city:
+            config["cities"][last_city].append(user_input)
+            await update.message.reply_text(f"✅ Тег {user_input} добавлен к городу {last_city}.")
+        else:
+            await update.message.reply_text("⚠️ Сначала добавьте город.")
+
+    elif action == "remove_city":
+        if user_input in config["cities"]:
+            del config["cities"][user_input]
+            await update.message.reply_text(f"🗑 Город {user_input} удалён.")
+        else:
+            await update.message.reply_text("⚠️ Такого города нет.")
+
+    elif action == "remove_tag":
+        for city, tags in config["cities"].items():
+            if user_input in tags:
+                tags.remove(user_input)
+                await update.message.reply_text(f"🗑 Тег {user_input} удалён из города {city}.")
+                break
+        else:
+            await update.message.reply_text("⚠️ Тег не найден.")
+
+    # Сохраняем изменения
+    with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+        json.dump(config, f, indent=2, ensure_ascii=False)
+
+    context.user_data.clear()
+    await update.message.reply_text("✅ Изменения сохранены. Чтобы открыть меню снова — /start")
+    return ConversationHandler.END
+
+
+# Регистрация хендлеров
+def register_menu_handlers(application):
+    menu_conv_handler = ConversationHandler(
+        entry_points=[CommandHandler("start", start)],
+        states={
+            CHOOSING_ACTION: [CallbackQueryHandler(button_handler)],ADD_CITY: [MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler)],
+            ADD_TAG: [MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler)],
+            REMOVE_CITY: [MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler)],
+            REMOVE_TAG: [MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler)],
+        },
+        fallbacks=[],
+        name="menu_conversation",
+        persistent=False,
+    )
+
+    application.add_handler(menu_conv_handler)
