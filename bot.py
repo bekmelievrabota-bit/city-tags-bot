@@ -1,12 +1,13 @@
-import json
 import logging
+import json
+import os
 from telegram import Update
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
 )
 
 # ======================
-# Настройка логирования
+# Логирование
 # ======================
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -15,9 +16,9 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ======================
-# Загрузка конфигурации
+# Загрузка config.json
 # ======================
-with open("config.json", encoding="utf-8") as f:
+with open("config.json", "r", encoding="utf-8") as f:
     config = json.load(f)
 
 BOT_TOKEN = config["bot_token"]
@@ -30,12 +31,17 @@ MATCH_CASE_INSENSITIVE = config.get("match_case_insensitive", True)
 # ======================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
-    logger.info(f"/start вызван в чате {chat_id} пользователем {update.effective_user.id}")
+    if ALLOWED_CHAT_IDS and chat_id not in ALLOWED_CHAT_IDS:
+        return
+    logger.info(f"/start вызван пользователем {update.effective_user.id}")
     await update.message.reply_text(
         "Привет! Я бот и теперь работаю в личке и в группах!"
     )
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    if ALLOWED_CHAT_IDS and chat_id not in ALLOWED_CHAT_IDS:
+        return
     await update.message.reply_text(
         "Список команд:\n"
         "/start - начать работу\n"
@@ -47,29 +53,57 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ======================
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
+    if ALLOWED_CHAT_IDS and chat_id not in ALLOWED_CHAT_IDS:
+        return
+
     user_id = update.effective_user.id
     username = update.effective_user.username
     text = update.message.text
+    logger.info(f"Сообщение от {username} ({user_id}): {text}")
 
-    # Логируем сообщение
-    logger.info(f"Сообщение от {username} ({user_id}) в чате {chat_id}: {text}")
+    response_tags = []
 
-    # Проверяем, разрешён ли чат
-    if ALLOWED_CHAT_IDS and chat_id not in ALLOWED_CHAT_IDS:
-        await update.message.reply_text("Извините, этот чат не разрешён для работы с ботом.")
-        return
+    # Поиск городов в сообщении
+    for city, tags in CITIES.items():
+        if MATCH_CASE_INSENSITIVE:
+            if city.lower() in text.lower():
+                response_tags.extend(tags)
+        else:
+            if city in text:
+                response_tags.extend(tags)
 
-    # Ищем город в тексте
-    response = []
-    text_to_match = text.lower() if MATCH_CASE_INSENSITIVE else text
-    for city, accounts in CITIES.items():
-        city_to_match = city.lower() if MATCH_CASE_INSENSITIVE else city
-        if city_to_match in text_to_match:
-            response.append(f"{city}: {', '.join(accounts)}")
-
-    if response:
-        await update.message.reply_text("\n".join(response))
+    if response_tags:
+        await update.message.reply_text(
+            " ".join(response_tags)
+        )
     else:
-        await update.message.reply_text("Город не найден или нет данных для этого города.")
+        await update.message.reply_text(f"Вы написали: {text}")
 
-# =
+# ======================
+# Основная функция
+# ======================
+def main():
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
+
+    # Обработчики команд
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("help", help_command))
+
+    # Обработка текстовых сообщений
+    app.add_handler(MessageHandler(
+        filters.TEXT & ~filters.COMMAND,
+        handle_message
+    ))
+
+    # Порт для Render
+    port = int(os.environ.get("PORT", 8000))
+
+    # Запуск вебхука
+    app.run_webhook(
+        listen="0.0.0.0",
+        port=port,
+        webhook_url=f"https://city-tags-bot.onrender.com/{BOT_TOKEN}"
+    )
+
+if __name__ == "__main__":
+    main()
