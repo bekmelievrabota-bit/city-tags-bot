@@ -141,6 +141,7 @@ menu_conv_handler = ConversationHandler(
         WAIT_INPUT: [MessageHandler(filters.TEXT & ~filters.COMMAND, text_input)],
     },
     fallbacks=[CommandHandler("menu", menu_command)],
+    per_message=True  # <--- добавляем, чтобы убрать предупреждение
 )
 
 # ================= В main добавляем =================
